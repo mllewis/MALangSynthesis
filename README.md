@@ -1,1 +1,1 @@
-
+Lewis, M., Braginsky, M., Tsuji, S., Bergmann, C., Piccinini, P., Cristia, A., \& Frank, M. C. (under revision). A quantitative synthesis of early language acquisition using meta-analysis. (http://metalab.stanford.edu/)[Metalab website] (https://speakerdeck.com/mllewis/metalab-1)[slides] 

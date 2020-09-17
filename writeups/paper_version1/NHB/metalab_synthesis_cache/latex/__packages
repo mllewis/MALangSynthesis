@@ -1,0 +1,14 @@
+base
+papaja
+shiny
+shinydashboard
+dplyr
+tidyr
+ggplot2
+purrr
+langcog
+feather
+knitr
+Matrix
+metafor
+directlabels

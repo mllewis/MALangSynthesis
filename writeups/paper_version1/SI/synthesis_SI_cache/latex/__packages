@@ -1,0 +1,11 @@
+base
+knitr
+shiny
+shinydashboard
+dplyr
+tidyr
+ggplot2
+purrr
+langcog
+feather
+xtable
