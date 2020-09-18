@@ -1,0 +1,231 @@
+---
+title: "Developmental curves"
+author: "Michael Frank and Molly Lewis"
+date: "Last updated on `r Sys.Date()`."
+output: 
+  html_document:
+    toc_float: yes
+    code_folding: show 
+    number_sections: no
+    toc: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(knitr)
+library(tidyverse)
+library(broom)
+library(metafor)
+library(ggthemes)
+library(brms)
+library(metalabr)
+library(tidybayes)
+```
+
+# Introduction
+
+Trying to pick back up the question of how different developmental phenomnena relate to one another and how they change over time. 
+
+Open questions:
+
+1. is growth (in ES) logarithmic, exponential, linear, etc.? 
+2. are phenomena all growing from the same zero point or are there offsets (e.g., do somethings "start" later or does all learning start at birth)
+
+Methodological idea: use bayesian meta-regression and model comparison to try and model ES across phenomena.
+
+Confounds:
+
+* selection of harder/easier studies across papers - need to look potentially at within-paper slopes
+* method confounds - need to control for this
+* need to remove MAs that don't represent real phenomena - major judgment call here
+
+Might want to limit to early language for now? Also could consider limiting to 0-36 or 0-48 months just because things blow up after that and data are sometimes sparse.
+
+# Exploration 
+
+Get MA data from metalabr package. Filter to kids =<36 mo. Note that we're currently missing 6 MAs. 
+
+```{r, cache = T}
+ml_dataset_info <- get_metalab_dataset_info() %>%
+  filter(domain == "early_language")
+
+ml_data <- get_metalab_data(ml_dataset_info) %>%
+    filter(mean_age_months < 36) %>%
+    mutate(d_se_calc = sqrt(d_var_calc)) %>%
+    select(short_cite, short_name, d_calc, d_se_calc, d_var_calc, method, mean_age_months) 
+```
+
+Data with curves by phenomenon. 
+
+```{r}
+ml_data %>%
+  ggplot(aes(x = mean_age_months, y = d_calc, 
+             weight = 1/d_var_calc)) +
+  geom_point(aes(size = 1/d_var_calc),
+             alpha = .3) + 
+  geom_smooth(method="lm", formula = y ~ x, 
+              aes(col = "Linear"), 
+              se = FALSE) + 
+  geom_smooth(method="lm", formula = y ~ log(x), 
+              aes(col = "Log"),
+              se = FALSE) + 
+  geom_smooth(method="lm", formula = y ~ I(x^2),
+              aes(col = "Quadratic"),
+              se = FALSE) +
+  facet_wrap(~ short_name, scales = "free_y") + 
+  geom_hline(yintercept = 0, lty = 2, col = "black") + 
+  xlab("Mean age (months)") +
+  ylab("Effect size (d)") +
+  scale_colour_solarized(name="Models", breaks = c("Linear", "Log",
+                                                "Quadratic", "Linear and Log"),
+                                     labels=c("Linear" = "Linear",
+                                              "Log" = "Log",
+                                              "Quadratic" = "Quadratic",
+                                              "Linear and Log" = "Linear and Log")) +
+  theme_few()
+```
+
+# Bayesian MA on IDS preference
+
+Note, pulling heavily from:
+
+* https://solomonkurz.netlify.app/post/bayesian-meta-analysis/
+* https://vuorre.netlify.app/post/2016/09/29/meta-analysis-is-a-special-case-of-bayesian-multilevel-modeling/
+
+## Fit the Metafor version (multi-level)
+```{r}
+idspref <- ml_data %>%
+  filter(short_name == "idspref")
+
+idspref_metafor <- rma.mv(yi = d_calc, V = d_var_calc, data = idspref, random = ~ 1 | short_cite)
+idspref_metafor
+```
+
+## Fit the Bayesian version - uninformative prior
+```{r, cache = T}
+idspref_bayes_uninformative <- 
+  brm(data = idspref, 
+      family = gaussian,
+      d_calc | se(d_se_calc) ~ 1 + (1 | short_cite),
+            prior = c(prior(uniform(-5, 5), class = Intercept),
+                    prior(uniform(-5, 5), class = sd)),
+      iter = 2000, warmup = 1000, cores = 4, chains = 4,
+      seed = 14)
+idspref_bayes_uninformative
+```
+
+## Fit the Bayesian version - informative prior
+```{r, cache = T}
+idspref_bayes <- 
+  brm(data = idspref, 
+      family = gaussian,
+      d_calc | se(d_se_calc) ~ 1 + (1 | short_cite),
+      prior = c(prior(normal(0, 1), class = Intercept),
+                prior(cauchy(0, 1), class = sd)),
+      iter = 2000, warmup = 1000, cores = 4, chains = 4,
+      seed = 14)
+idspref_bayes
+```
+
+Sanity check: multilevel model metafor estimates are identical to estimates in bayes model with uninformative priors, and comparable to bayes with some priors. 
+
+# All MAs
+Bayesian models with all non-null MAs.
+
+Get non-null MAs. Null MA defined as a case where CI includes 0. 
+```{r, cache = T, echo = F}
+get_es_estimate <- function(d) {
+  brm(data = d, 
+      family = gaussian,
+      d_calc | se(d_se_calc) ~ 1 + (1 | short_cite),
+      prior = c(prior(normal(0, 1), class = Intercept),
+                prior(cauchy(0, 1), class = sd)),
+      iter = 2000, warmup = 1000, cores = 4, chains = 4,
+      seed = 14) %>%
+  tidy() %>%
+  filter(term == "b_Intercept")
+}
+
+overall_estimates <- ml_data %>%
+  group_by(short_name) %>%
+  nest() %>%
+  mutate(temp = map(data, get_es_estimate)) %>%
+  select(-data) %>%
+  unnest()
+
+non_null_mas <- overall_estimates %>%
+  mutate(ma_is_null = (upper > 0) & (lower < 0)) %>%
+  filter(!ma_is_null) %>%
+  pull(short_name)
+```
+
+## Linear age predictor 
+
+ISSUES:
+
+* should method be a random or fixed effect?
+* this weird thing happens where every time I fit this model, the first 3 chains error out, and the 4th one works. The error is `[1] "Error in sampler$call_sampler(args_list[[i]]) : "         
+[2] "  c++ exception (unknown reason)"`
+* the model you specified doesn't have a prior for age.....do we need/want one? What happens if you don't specify it? I added a normal prior.
+
+```{r, cache = T, message = F, warning = F}
+alldata_bayes_linear <- ml_data %>%
+  filter(short_name %in% non_null_mas) %>%
+  brm(data = ., 
+      family = gaussian,
+      d_calc | se(d_se_calc) ~ mean_age_months 
+                                + method # should method be a random effect or a fixed effect?
+                                + (mean_age_months | short_cite) 
+                                + (mean_age_months | short_name),
+      prior = c(prior(normal(0, 1), class = Intercept),
+               prior(normal(0, 1), class = b), 
+                prior(cauchy(0, 1), class = sd)),
+      iter = 5000, warmup = 2000, cores = 4, chains = 4,
+      seed = 14)
+```
+
+`launch_shinystan(alldata_bayes)` launches a cool shiny app that allows you to explore the parameters interactively. 
+
+```{r}
+alldata_bayes_linear %>%
+  spread_draws(b_mean_age_months) %>%
+  ggplot(aes(x = b_mean_age_months)) +
+  geom_histogram() +
+  geom_halfeyeh(.width = .95, size = 8, color = "red") +
+  xlab("age coefficient")
+```
+
+## Log linear age predictor 
+
+
+Now, let's do log age:
+```{r, cache = T}
+alldata_bayes_log <- ml_data %>%
+  filter(short_name %in% non_null_mas) %>%
+  brm(data = ., 
+      family = gaussian,
+      d_calc | se(d_se_calc) ~ log(mean_age_months)
+                                + method # should method be a random effect or a fixed effect?
+                                + (mean_age_months | short_cite) 
+                                + (mean_age_months | short_name),
+      prior = c(prior(normal(0, 1), class = Intercept), 
+                prior(normal(0, 1), class = b), 
+                prior(cauchy(0, 1), class = sd)),
+      iter = 5000, warmup = 2000, cores = 4, chains = 4,
+      seed = 14)
+```
+
+```{r}
+alldata_bayes_log %>%
+  spread_draws(b_logmean_age_months) %>%
+  ggplot(aes(x = b_logmean_age_months)) +
+  geom_histogram() +
+  geom_halfeyeh(.width = .95, size = 8, color = "red") +
+  xlab("age coefficient")
+```
+
+Compare these models via their R-squared values:
+```{r}
+bayes_R2(alldata_bayes_linear)
+bayes_R2(alldata_bayes_log)
+```
